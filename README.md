@@ -20,7 +20,7 @@ python src/tag_image.py assets/examples/cat.jpg --topk 4 --adj
 # cat.jpg (113ms): couch kitty, grey cosy, cat plush, sleeping crib
 ```
 
-![pipeline](docs/figures/pipeline.jpg)
+![pipeline](docs/figures/pipeline.png)
 
 ## Results (real benchmark: 150 COCO-val images, 80-category closed set)
 
