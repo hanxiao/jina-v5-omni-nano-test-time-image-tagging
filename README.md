@@ -20,7 +20,58 @@ python src/tag_image.py assets/examples/cat.jpg --topk 4 --adj
 # cat.jpg (113ms): couch kitty, grey cosy, cat plush, sleeping crib
 ```
 
-![pipeline](docs/figures/pipeline.png)
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'fontSize':'15px','fontFamily':'Helvetica'}}}%%
+flowchart LR
+  subgraph OFF["Offline · cached once"]
+    direction TB
+    V["Tokenizer vocab<br/>128,260 tokens"] -->|encode_text<br/>NOT embed_tokens| E["Label matrix E<br/>128260 × 768"]
+    GATE["word-start gate<br/>→ 25,465 clean words"]
+    MU["per-label prior mu<br/>from background images"]
+  end
+
+  subgraph IMG["Per image · frozen model"]
+    direction TB
+    IN["Input image"] --> VIS["Qwen3VL Vision Tower (frozen)"] --> TXT["Bidirectional Text Tower<br/>EuroBERT-12L (frozen)"]
+    TXT --> P["Patch features P"]
+    TXT --> G["Global pooled g"]
+  end
+
+  SCORE["SCORING<br/>s_patch = max_patch(P·E)<br/>s_global = g·E"]
+  BASE["base = 0.7·s_patch + 0.3·s_global − mu"]
+
+  E -.->|cosine vs labels E| SCORE
+  P ==> SCORE
+  G ==> SCORE
+  SCORE ==> BASE
+  MU -.->|subtract prior| BASE
+
+  subgraph CWR["CWR multi-crop (--hq) · the accuracy win"]
+    direction TB
+    IN2["Input image → 14 crops<br/>3x3 + 2x2 + center"] --> CF["same frozen model → features"] --> CMAX["per-label MAX across crops"]
+  end
+  E -.->|cosine vs labels E| CMAX
+  BASE ==> FUSE["S = base + 1.3 · s_crop"]
+  CMAX ==> FUSE
+
+  FUSE ==> POST["word-start gate + embedding-NMS dedup"]
+  GATE -.->|keep word tokens only| POST
+  POST ==> OUT["Top-k TAGS"]
+  POST -.->|optional --adj| ADJ["patch-local adjectives<br/>grey cat · fur bear"]
+
+  classDef off fill:#eef4fb,stroke:#4a7ab5,color:#1a2c40;
+  classDef img fill:#e8f6f2,stroke:#3aa088,color:#12352c;
+  classDef cwr fill:#fdf0e2,stroke:#e08a3c,color:#6b3d10;
+  classDef score fill:#fff8e6,stroke:#c8a03c,color:#4a3a10;
+  classDef out fill:#f0eafb,stroke:#7a5bb5,color:#2c1a40;
+  class V,E,GATE,MU off;
+  class IN,VIS,TXT,P,G img;
+  class IN2,CF,CMAX cwr;
+  class SCORE,BASE,FUSE score;
+  class POST,OUT,ADJ out;
+```
+
+_(Benchmark: COCO-150, 80-cat — patch mAP 0.635 / P@1 0.753 → + CWR mAP 0.710 / P@1 0.813. Diagram source: [`docs/figures/pipeline.mmd`](docs/figures/pipeline.mmd).)_
 
 ## Results (real benchmark: 150 COCO-val images, 80-category closed set)
 
