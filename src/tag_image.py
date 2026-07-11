@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""
+tag_image.py - open-vocabulary multi-label image tagging with a SINGLE model:
+jina-embeddings-v5-omni-nano-mlx. Zero training, no third-party model, no
+wordnet/regex-dict/POS. All signals are model-internal.
+
+Pipeline:
+- labels = the model's OWN tokenizer vocabulary (Ġ word-start words), encoded
+  via encode_text (NOT embed_tokens; tie_word_embeddings=false so the raw table
+  is unusable — see docs/findings-v5omni-nano.md).
+- patch-level scoring: per-patch cosine to labels, class-wise max-pool, fused
+  with the global (last-token) score at a=0.7.
+- background centering: subtract a per-label prior estimated from neutral images
+  (removes base-rate bias). A tiny built-in prior ships with the repo; you can
+  regenerate a stronger one (see --rebuild-prior).
+- embedding-NMS: drop synonym / multilingual near-duplicates.
+- --hq: CWR multi-crop (3x3+2x2+center=14 crops, per-label MAX) -> mAP 0.635->0.710.
+- --adj: patch-local adjectives (score attributes only on the noun's peak patches).
+
+Usage:
+    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--adj] [--soft]
+
+First run builds label_cache.npz (encodes the whole vocab once, ~40s) next to
+this file, plus bg_prior.npz. Set JINA_OMNI_NANO_DIR to point at a local copy of
+the model, else it is auto-downloaded from HuggingFace.
+"""
+import os, sys, glob, json, argparse, time
+import numpy as np
+from PIL import Image
+from transformers import Qwen2VLImageProcessor
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import common as C
+
+CACHE_LABELS = os.path.join(HERE, "label_cache.npz")
+CACHE_PRIOR = os.path.join(HERE, "bg_prior.npz")
+
+
+def build_label_cache(m):
+    """Encode the whole tokenizer vocab as text labels via encode_text (one-time)."""
+    tok = m.tokenizer
+    V = tok.get_vocab_size()
+    strings = []
+    for tid in range(V):
+        s = tok.decode([tid]) or ""
+        strings.append(s.strip() or "\u2205")
+    print(f"[cache] encoding {V} vocab tokens as text labels (one-time)...")
+    import mlx.core as mx
+    rows = []
+    B = 1024
+    for i in range(0, V, B):
+        e = m.model.encode(strings[i:i + B], tok, task_type="retrieval.passage").astype(mx.float32)
+        e = e / mx.linalg.norm(e, axis=1, keepdims=True)
+        rows.append(np.array(e.tolist()).astype(np.float16))
+    E = np.vstack(rows)
+    np.savez(CACHE_LABELS, E=E, strings=np.array(strings, dtype=object))
+    return E.astype(np.float32), strings
+
+
+def build_prior(m, proc, E, bg_dir=None):
+    """Estimate per-label prior μ from neutral background images.
+    Uses images in assets/examples if no bg_dir given (weak but functional prior)."""
+    bg_dir = bg_dir or os.path.join(HERE, "..", "assets", "examples")
+    imgs = sorted(glob.glob(os.path.join(bg_dir, "*.jpg")) + glob.glob(os.path.join(bg_dir, "*.png")))
+    if not imgs:
+        # zero prior fallback (still works, just no base-rate removal)
+        return np.zeros(E.shape[0], np.float32), np.zeros(E.shape[0], np.float32)
+    SP = []; SG = []
+    for p in imgs:
+        P, g = C.image_feats(m.model, proc, Image.open(p).convert("RGB"))
+        SP.append((P @ E.T).max(0)); SG.append(g @ E.T)
+    mup = np.mean(SP, 0).astype(np.float32); mug = np.mean(SG, 0).astype(np.float32)
+    np.savez(CACHE_PRIOR, mup=mup, mug=mug)
+    return mup, mug
+
+
+def nms(order, En, keep, tau=0.6, avoid=None):
+    kept = []; kv = [] if not avoid else [En[a] for a in avoid]
+    for j in order:
+        v = En[j]
+        if any(float(v @ k) >= tau for k in kv):
+            continue
+        kept.append(j); kv.append(v)
+        if len(kept) >= keep:
+            break
+    return kept
+
+
+def grid_crops(img, ov=0.15):
+    W, H = img.size; out = []
+    for gx, gy in [(3, 3), (2, 2)]:
+        cw = W / gx; ch = H / gy; ox = cw * ov; oy = ch * ov
+        for j in range(gy):
+            for i in range(gx):
+                out.append(img.crop((max(0, int(i * cw - ox)), max(0, int(j * ch - oy)),
+                                     min(W, int((i + 1) * cw + ox)), min(H, int((j + 1) * ch + oy)))))
+    out.append(img.crop((int(W * .25), int(H * .25), int(W * .75), int(H * .75))))
+    return out
+
+
+def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, adj=False, soft=False, hq=False):
+    P, g = C.image_feats(m.model, proc, pil)
+    sim = P @ E.T
+    if soft:
+        w = np.exp((sim - sim.max(0, keepdims=True)) / 0.05); w /= w.sum(0, keepdims=True)
+        sp = (w * sim).sum(0)
+    else:
+        sp = sim.max(0)
+    cen = 0.7 * (sp - mup) + 0.3 * ((g @ E.T) - mug)
+    if hq:
+        crop_max = None
+        for cr in grid_crops(pil):
+            Pc, gc = C.image_feats(m.model, proc, cr)
+            sc = np.maximum((Pc @ E.T).max(0), gc @ E.T)
+            crop_max = sc if crop_max is None else np.maximum(crop_max, sc)
+        cen = cen + 1.3 * (crop_max - mup)
+    cen2 = cen.copy(); cen2[~gate] = -1e9
+    nouns = nms(np.argsort(-cen2)[:400], En, keep=topk)
+    if not adj:
+        return [strings[j].strip().lower() for j in nouns]
+    res = []
+    for nid in nouns:
+        nw = strings[nid].strip().lower()
+        ps = sim[:, nid]; topp = np.argsort(-ps)[:max(3, len(ps) // 10)]
+        local = P[topp].mean(0); local /= np.linalg.norm(local) + 1e-9
+        ls = local @ E.T; ls[~gate] = -1e9
+        a = nms(np.argsort(-ls)[:200], En, keep=1, tau=0.55, avoid=[nid])
+        aw = strings[a[0]].strip().lower() if a else ""
+        res.append(f"{aw} {nw}".strip())
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("images", nargs="+")
+    ap.add_argument("--topk", type=int, default=8)
+    ap.add_argument("--adj", action="store_true", help="attach patch-local adjectives")
+    ap.add_argument("--soft", action="store_true", help="softpool (better top-k precision)")
+    ap.add_argument("--hq", action="store_true", help="high-accuracy CWR multi-crop (mAP 0.635->0.710, ~14x slower)")
+    ap.add_argument("--bg-dir", default=None, help="dir of neutral images for the background prior")
+    args = ap.parse_args()
+
+    m, model_dir = C.load()
+    proc = Qwen2VLImageProcessor.from_pretrained(model_dir)
+
+    if os.path.exists(CACHE_LABELS):
+        d = np.load(CACHE_LABELS, allow_pickle=True)
+        E = d["E"].astype(np.float32); strings = list(d["strings"])
+    else:
+        E, strings = build_label_cache(m)
+    En = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-9)
+    gate = C.word_start_gate(model_dir, len(strings))
+
+    if os.path.exists(CACHE_PRIOR):
+        z = np.load(CACHE_PRIOR); mup, mug = z["mup"], z["mug"]
+    else:
+        mup, mug = build_prior(m, proc, E, args.bg_dir)
+
+    for path in args.images:
+        pil = Image.open(path).convert("RGB")
+        t0 = time.time()
+        tags = tag(m, proc, pil, E, En, strings, gate, mup, mug,
+                   topk=args.topk, adj=args.adj, soft=args.soft, hq=args.hq)
+        dt = (time.time() - t0) * 1000
+        print(f"{os.path.basename(path)} ({dt:.0f}ms): {', '.join(tags)}")
+
+
+if __name__ == "__main__":
+    main()

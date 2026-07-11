@@ -1,0 +1,6 @@
+mlx>=0.20
+numpy>=1.24
+pillow>=10.0
+transformers>=4.45
+huggingface_hub>=0.25
+tokenizers>=0.20

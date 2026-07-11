@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# auto-built caches (large; regenerated on first run)
+src/label_cache.npz
+*.npy
+eval/eval_imgs/
+eval/annotations/
+eval/*.npz
+experiments/**/*.npz
+# keep the small shipped background prior
+!src/bg_prior.npz
