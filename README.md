@@ -84,6 +84,24 @@ _(Benchmark: COCO-150, 80-cat — patch mAP 0.635 / P@1 0.753 → + CWR mAP 0.71
 
 Latency (M3 Ultra, MLX): fast mode ~60–90 ms/image; `--hq` ~1 s/image (14 crops).
 
+## Demo: one image, four modes
+
+Five images tagged with each mode (`fast` / `--soft` / `--hq` / `--adj`). Labels
+come straight from the tokenizer vocab, so multilingual variants (voiture, carro)
+and a few fragments show up — the price of a zero-annotation open vocabulary.
+
+| image | `fast` | `--soft` | `--hq` (CWR) | `--adj` |
+|---|---|---|---|---|
+| <img src="assets/demo/photo1.jpg" width="150"><br>AI conference hall | interviewing, conference, astronauts, onstage | backstage, documentary, doubts | onstage, attendees, ceilings, seats, concert | demonstration conference, backstage interviewing |
+| <img src="assets/demo/photo2.jpg" width="150"><br>expo corridor crowd | attendees, passengers, protesters | attendees, gauche | attendees, passengers, ceiling, crowded | passengers attendees, demonstrators passengers |
+| <img src="assets/demo/photo3.jpg" width="150"><br>Porsche 911 interior | voiture, steering, yacht, dealership | sail, steering, seaside, engines | **carro, leather, steering, clock, seat** | automotive steering, carro dealership |
+| <img src="assets/demo/photo4.jpg" width="150"><br>Porsche on coastal road | driv, highway, racing, trail | road, racing, safari, cruising | highway, speeding, hill, climbing | highway driv, road racing |
+| <img src="assets/demo/photo5.jpg" width="150"><br>bear on grass | wolf, roar, muzzle, monkey | wolf, muzzle, hunting | **fur, bear, muzzle, ivory** | fur roar, elephant muzzle |
+
+`--hq` (CWR multi-crop) is clearly the sharpest: it recovers the small **bear**
+(fast/soft only reach "wolf") and picks up fine 911-interior detail
+(clock/leather/seat/steering). Cost: ~2 s/image vs ~300 ms for `fast`.
+
 ## Why this design (the short version)
 
 The whole project is an exercise in **finding what the model already knows** and
