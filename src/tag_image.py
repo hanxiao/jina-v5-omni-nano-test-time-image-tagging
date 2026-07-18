@@ -15,10 +15,11 @@ Pipeline:
   regenerate a stronger one (see --rebuild-prior).
 - embedding-NMS: drop synonym / multilingual near-duplicates.
 - --hq: CWR multi-crop (3x3+2x2+center=14 crops, per-label MAX) -> mAP 0.635->0.710.
-- --adj: patch-local adjectives (score attributes only on the noun's peak patches).
+- --ngram N: patch-local n-grams (score modifier words only on the noun's peak
+  patches; N-1 modifiers per noun, no word-class constraint).
 
 Usage:
-    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--adj] [--soft]
+    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--ngram 2] [--soft]
 
 First run builds label_cache.npz (encodes the whole vocab once, ~40s) next to
 this file, plus bg_prior.npz. Set JINA_OMNI_NANO_DIR to point at a local copy of
@@ -99,7 +100,7 @@ def grid_crops(img, ov=0.15):
     return out
 
 
-def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, adj=False, soft=False, hq=False):
+def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, soft=False, hq=False):
     P, g = C.image_feats(m.model, proc, pil)
     sim = P @ E.T
     if soft:
@@ -117,17 +118,19 @@ def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, adj=False, soft=Fa
         cen = cen + 1.3 * (crop_max - mup)
     cen2 = cen.copy(); cen2[~gate] = -1e9
     nouns = nms(np.argsort(-cen2)[:400], En, keep=topk)
-    if not adj:
+    if ngram <= 1:
         return [strings[j].strip().lower() for j in nouns]
     res = []
     for nid in nouns:
         nw = strings[nid].strip().lower()
+        # pool the noun's support region; rank ALL gated words on it; take the
+        # n-1 top survivors (noun cluster excluded, mutual NMS) as modifiers.
         ps = sim[:, nid]; topp = np.argsort(-ps)[:max(3, len(ps) // 10)]
         local = P[topp].mean(0); local /= np.linalg.norm(local) + 1e-9
         ls = local @ E.T; ls[~gate] = -1e9
-        a = nms(np.argsort(-ls)[:200], En, keep=1, tau=0.55, avoid=[nid])
-        aw = strings[a[0]].strip().lower() if a else ""
-        res.append(f"{aw} {nw}".strip())
+        mods = nms(np.argsort(-ls)[:200], En, keep=ngram - 1, tau=0.55, avoid=[nid])
+        words = [strings[a].strip().lower() for a in mods] + [nw]
+        res.append(" ".join(w for w in words if w))
     return res
 
 
@@ -135,7 +138,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("images", nargs="+")
     ap.add_argument("--topk", type=int, default=8)
-    ap.add_argument("--adj", action="store_true", help="attach patch-local adjectives")
+    ap.add_argument("--ngram", type=int, default=1, help="emit patch-local n-grams: N-1 grounded modifiers per tag (1 = plain tags)")
     ap.add_argument("--soft", action="store_true", help="softpool (better top-k precision)")
     ap.add_argument("--hq", action="store_true", help="high-accuracy CWR multi-crop (mAP 0.635->0.710, ~14x slower)")
     ap.add_argument("--bg-dir", default=None, help="dir of neutral images for the background prior")
@@ -161,7 +164,7 @@ def main():
         pil = Image.open(path).convert("RGB")
         t0 = time.time()
         tags = tag(m, proc, pil, E, En, strings, gate, mup, mug,
-                   topk=args.topk, adj=args.adj, soft=args.soft, hq=args.hq)
+                   topk=args.topk, ngram=args.ngram, soft=args.soft, hq=args.hq)
         dt = (time.time() - t0) * 1000
         print(f"{os.path.basename(path)} ({dt:.0f}ms): {', '.join(tags)}")
 
