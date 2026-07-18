@@ -16,8 +16,11 @@ python src/tag_image.py assets/examples/cat.jpg --topk 6
 python src/tag_image.py assets/examples/zebra.jpg --topk 5 --hq
 # zebra.jpg (1016ms): fur, bear, puppy, muzzle, leather   # <- CWR recovers the small bear
 
-python src/tag_image.py assets/examples/cat.jpg --topk 4 --adj
-# cat.jpg (113ms): couch kitty, grey cosy, cat plush, sleeping crib
+python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 2
+# cat.jpg (112ms): couch kitty, grey cosy, cat plush, sleeping crib
+
+python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 3
+# cat.jpg (114ms): couch fleece kitty, grey blanket cosy, cat cloak plush, sleeping fleece crib
 ```
 
 ```mermaid
@@ -57,7 +60,7 @@ flowchart LR
   FUSE ==> POST["word-start gate + embedding-NMS dedup"]
   GATE -.->|keep word tokens only| POST
   POST ==> OUT["Top-k TAGS"]
-  POST -.->|optional --adj| ADJ["patch-local adjectives<br/>grey cat · fur bear"]
+  POST -.->|optional --ngram| ADJ["patch-local n-grams<br/>couch kitty · grey blanket cosy"]
 
   classDef off fill:#eef4fb,stroke:#4a7ab5,color:#1a2c40;
   classDef img fill:#e8f6f2,stroke:#3aa088,color:#12352c;
@@ -86,11 +89,11 @@ Latency (M3 Ultra, MLX): fast mode ~60–90 ms/image; `--hq` ~1 s/image (14 crop
 
 ## Demo: one image, four modes
 
-Five images tagged with each mode (`fast` / `--soft` / `--hq` / `--adj`). Labels
+Five images tagged with each mode (`fast` / `--soft` / `--hq` / `--ngram 2`). Labels
 come straight from the tokenizer vocab, so multilingual variants (voiture, carro)
 and a few fragments show up — the price of a zero-annotation open vocabulary.
 
-| image | `fast` | `--soft` | `--hq` (CWR) | `--adj` |
+| image | `fast` | `--soft` | `--hq` (CWR) | `--ngram 2` |
 |---|---|---|---|---|
 | <img src="assets/demo/photo1.jpg" width="150"><br>AI conference hall | interviewing, conference, astronauts, onstage | backstage, documentary, doubts | onstage, attendees, ceilings, seats, concert | demonstration conference, backstage interviewing |
 | <img src="assets/demo/photo2.jpg" width="150"><br>expo corridor crowd | attendees, passengers, protesters | attendees, gauche | attendees, passengers, ceiling, crowded | passengers attendees, demonstrators passengers |
@@ -137,10 +140,13 @@ not adding machinery it doesn't need. Key grounded findings (full log in
    done right** — full-coverage grid + per-label max (take the strongest
    evidence), not blind center-crop averaging (which *hurt*).
 
-7. **Patch-local adjectives (`--adj`)** attach modifiers without a POS tagger:
-   find the patches where a noun fires, pool that local region, and score
-   attribute words *only there*. "grey cat", "fur bear" — the modifier is tied
-   to the object's pixels, so bag-of-words noise can't win.
+7. **Patch-local n-grams (`--ngram N`)** attach grounded modifiers without a
+   POS tagger or any word-class constraint: find the patches where a tag fires,
+   pool that local region, and let the whole gated vocabulary compete *only
+   there*, with the tag's own concept cluster suppressed by embedding-NMS. The
+   N-1 survivors become modifiers: "couch kitty" (bigram), "grey blanket cosy"
+   (trigram). The modifier is tied to the object's pixels, so bag-of-words
+   noise can't win. Strictly these are region-grounded n-grams, not adjectives.
 
 ## What did NOT work (and why it's the interesting part)
 
@@ -183,14 +189,14 @@ First run encodes the whole vocabulary once (`src/label_cache.npz`, ~40 s) and
 reuses it after. A small background prior ships in `src/bg_prior.npz`; regenerate
 a stronger one by pointing `--bg-dir` at a folder of neutral images.
 
-Flags: `--topk N` · `--hq` (CWR, higher accuracy) · `--adj` (adjectives) ·
+Flags: `--topk N` · `--hq` (CWR, higher accuracy) · `--ngram N` (grounded n-grams) ·
 `--soft` (softpool, better top-k precision).
 
 ## Repo layout
 
 ```
 src/
-  tag_image.py        # the tagger (fast / --hq / --adj / --soft), self-contained
+  tag_image.py        # the tagger (fast / --hq / --ngram / --soft), self-contained
   common.py           # portable model resolution + frozen forward passes
   bg_prior.npz        # small shipped background prior
 eval/
