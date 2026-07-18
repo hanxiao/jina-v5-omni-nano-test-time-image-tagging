@@ -17,9 +17,12 @@ Pipeline:
 - --hq: CWR multi-crop (3x3+2x2+center=14 crops, per-label MAX) -> mAP 0.635->0.710.
 - --ngram N: patch-local n-grams (score modifier words only on the noun's peak
   patches; N-1 modifiers per noun, no word-class constraint).
+- --beam: score ASSEMBLED phrases with the encoder itself (beam search over
+  modifier slots; s(phrase) = cos(encode_text(phrase), region) - noun baseline).
+  Slower (~1-2 s/image extra) but the model judges composition and order.
 
 Usage:
-    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--ngram 2] [--soft]
+    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--ngram 2] [--beam] [--soft]
 
 First run builds label_cache.npz (encodes the whole vocab once, ~40s) next to
 this file, plus bg_prior.npz. Set JINA_OMNI_NANO_DIR to point at a local copy of
@@ -100,7 +103,7 @@ def grid_crops(img, ov=0.15):
     return out
 
 
-def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, soft=False, hq=False):
+def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, beam=False, soft=False, hq=False):
     P, g = C.image_feats(m.model, proc, pil)
     sim = P @ E.T
     if soft:
@@ -128,10 +131,41 @@ def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, soft=Fals
         ps = sim[:, nid]; topp = np.argsort(-ps)[:max(3, len(ps) // 10)]
         local = P[topp].mean(0); local /= np.linalg.norm(local) + 1e-9
         ls = local @ E.T; ls[~gate] = -1e9
-        mods = nms(np.argsort(-ls)[:200], En, keep=ngram - 1, tau=0.55, avoid=[nid])
-        words = [strings[a].strip().lower() for a in mods] + [nw]
-        res.append(" ".join(w for w in words if w))
+        order = np.argsort(-ls)[:200]
+        if not beam:
+            mods = nms(order, En, keep=ngram - 1, tau=0.55, avoid=[nid])
+            words = [strings[a].strip().lower() for a in mods] + [nw]
+            res.append(" ".join(w for w in words if w))
+            continue
+        # --beam: the encoder itself scores assembled phrases against the region
+        # (margin over the bare noun), searching modifier choice AND order.
+        kv = En[nid]
+        cands = [j for j in order if float(En[j] @ kv) < 0.55][:12]
+        cw = [strings[j].strip().lower() for j in cands]
+        base = float(_encode_texts(m, [nw])[0] @ local)
+        beams = [([], 0.0)]
+        for _ in range(ngram - 1):
+            exp = []
+            for mo, _sc in beams:
+                used = [cands[cw.index(x)] for x in mo]
+                for w, j in zip(cw, cands):
+                    if w in mo: continue
+                    if any(float(En[j] @ En[k]) >= 0.55 for k in used): continue
+                    exp.append(mo + [w])
+            if not exp: break
+            phrases = [" ".join(list(reversed(mo)) + [nw]) for mo in exp]
+            sc = _encode_texts(m, phrases) @ local - base
+            beams = sorted(zip(exp, sc.tolist()), key=lambda t: -t[1])[:4]
+        best = beams[0][0]
+        res.append(" ".join(list(reversed(best)) + [nw]))
     return res
+
+
+def _encode_texts(m, texts):
+    import mlx.core as mx
+    e = m.model.encode(texts, m.tokenizer, task_type="retrieval.passage").astype(mx.float32)
+    e = e / mx.linalg.norm(e, axis=1, keepdims=True)
+    return np.array(e.tolist(), dtype=np.float32)
 
 
 def main():
@@ -139,6 +173,7 @@ def main():
     ap.add_argument("images", nargs="+")
     ap.add_argument("--topk", type=int, default=8)
     ap.add_argument("--ngram", type=int, default=1, help="emit patch-local n-grams: N-1 grounded modifiers per tag (1 = plain tags)")
+    ap.add_argument("--beam", action="store_true", help="beam-search phrases scored by the encoder itself (with --ngram >= 2)")
     ap.add_argument("--soft", action="store_true", help="softpool (better top-k precision)")
     ap.add_argument("--hq", action="store_true", help="high-accuracy CWR multi-crop (mAP 0.635->0.710, ~14x slower)")
     ap.add_argument("--bg-dir", default=None, help="dir of neutral images for the background prior")
@@ -164,7 +199,7 @@ def main():
         pil = Image.open(path).convert("RGB")
         t0 = time.time()
         tags = tag(m, proc, pil, E, En, strings, gate, mup, mug,
-                   topk=args.topk, ngram=args.ngram, soft=args.soft, hq=args.hq)
+                   topk=args.topk, ngram=args.ngram, beam=args.beam, soft=args.soft, hq=args.hq)
         dt = (time.time() - t0) * 1000
         print(f"{os.path.basename(path)} ({dt:.0f}ms): {', '.join(tags)}")
 

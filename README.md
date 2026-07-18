@@ -21,7 +21,16 @@ python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 2
 
 python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 3
 # cat.jpg (114ms): couch fleece kitty, grey blanket cosy, cat cloak plush, sleeping fleece crib
+
+python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 3 --beam
+# cat.jpg (238ms): grey couch kitty, sleeping black cosy, grey sleeping plush, sleeps grey crib
 ```
+
+`--beam` upgrades the greedy modifier pick to a beam search where the **encoder
+itself scores the assembled phrase** against the tag's patch region (margin over
+the bare tag). The model turns out to prefer attribute-first order ("grey couch
+kitty" over "couch grey kitty") with no grammar anywhere — composition emerges
+from the embedding space. Experiment: `experiments/exp_ngram_beam.py`.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontSize':'15px','fontFamily':'Helvetica'}}}%%
@@ -189,7 +198,7 @@ First run encodes the whole vocabulary once (`src/label_cache.npz`, ~40 s) and
 reuses it after. A small background prior ships in `src/bg_prior.npz`; regenerate
 a stronger one by pointing `--bg-dir` at a folder of neutral images.
 
-Flags: `--topk N` · `--hq` (CWR, higher accuracy) · `--ngram N` (grounded n-grams) ·
+Flags: `--topk N` · `--hq` (CWR, higher accuracy) · `--ngram N` (grounded n-grams) · `--beam` (encoder-scored phrases) ·
 `--soft` (softpool, better top-k precision).
 
 ## Repo layout
