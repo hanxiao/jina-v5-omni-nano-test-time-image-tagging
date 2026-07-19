@@ -17,12 +17,13 @@ Pipeline:
 - --hq: CWR multi-crop (3x3+2x2+center=14 crops, per-label MAX) -> mAP 0.635->0.710.
 - --ngram N: patch-local n-grams (score modifier words only on the noun's peak
   patches; N-1 modifiers per noun, no word-class constraint).
-- --beam: score ASSEMBLED phrases with the encoder itself (beam search over
-  modifier slots; s(phrase) = cos(encode_text(phrase), region) - noun baseline).
-  Slower (~1-2 s/image extra) but the model judges composition and order.
+- n-grams use beam search BY DEFAULT: assembled phrases are scored by the
+  encoder itself (s(phrase) = cos(encode_text(phrase), region) - tag baseline),
+  so the model judges composition and order. --no-beam falls back to the greedy
+  pick off the region ranking.
 
 Usage:
-    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--ngram 2] [--beam] [--soft]
+    python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--ngram 2] [--soft]
 
 First run builds label_cache.npz (encodes the whole vocab once, ~40s) next to
 this file, plus bg_prior.npz. Set JINA_OMNI_NANO_DIR to point at a local copy of
@@ -103,7 +104,7 @@ def grid_crops(img, ov=0.15):
     return out
 
 
-def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, beam=False, soft=False, hq=False):
+def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, beam=True, soft=False, hq=False):
     P, g = C.image_feats(m.model, proc, pil)
     sim = P @ E.T
     if soft:
@@ -173,7 +174,8 @@ def main():
     ap.add_argument("images", nargs="+")
     ap.add_argument("--topk", type=int, default=8)
     ap.add_argument("--ngram", type=int, default=1, help="emit patch-local n-grams: N-1 grounded modifiers per tag (1 = plain tags)")
-    ap.add_argument("--beam", action="store_true", help="beam-search phrases scored by the encoder itself (with --ngram >= 2)")
+    ap.add_argument("--no-beam", dest="beam", action="store_false", default=True,
+                    help="disable beam search; greedy modifier pick off the region ranking (with --ngram >= 2)")
     ap.add_argument("--soft", action="store_true", help="softpool (better top-k precision)")
     ap.add_argument("--hq", action="store_true", help="high-accuracy CWR multi-crop (mAP 0.635->0.710, ~14x slower)")
     ap.add_argument("--bg-dir", default=None, help="dir of neutral images for the background prior")

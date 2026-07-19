@@ -17,20 +17,19 @@ python src/tag_image.py assets/examples/zebra.jpg --topk 5 --hq
 # zebra.jpg (1016ms): fur, bear, puppy, muzzle, leather   # <- CWR recovers the small bear
 
 python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 2
-# cat.jpg (112ms): couch kitty, grey cosy, cat plush, sleeping crib
+# cat.jpg (166ms): couch kitty, black cosy, grey plush, grey crib
 
 python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 3
-# cat.jpg (114ms): couch fleece kitty, grey blanket cosy, cat cloak plush, sleeping fleece crib
-
-python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 3 --beam
 # cat.jpg (238ms): grey couch kitty, sleeping black cosy, grey sleeping plush, sleeps grey crib
+
 ```
 
-`--beam` upgrades the greedy modifier pick to a beam search where the **encoder
-itself scores the assembled phrase** against the tag's patch region (margin over
-the bare tag). The model turns out to prefer attribute-first order ("grey couch
-kitty" over "couch grey kitty") with no grammar anywhere — composition emerges
-from the embedding space. Experiment: `experiments/exp_ngram_beam.py`.
+N-grams **beam-search by default**: the encoder itself scores each assembled
+phrase against the tag's patch region (margin over the bare tag). The model
+turns out to prefer attribute-first order ("grey couch kitty" over "couch grey
+kitty") with no grammar anywhere — composition emerges from the embedding
+space. `--no-beam` falls back to the greedy pick off the region ranking.
+Experiment: `experiments/exp_ngram_beam.py`.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontSize':'15px','fontFamily':'Helvetica'}}}%%
@@ -104,11 +103,11 @@ and a few fragments show up — the price of a zero-annotation open vocabulary.
 
 | image | `fast` | `--soft` | `--hq` (CWR) | `--ngram 2` |
 |---|---|---|---|---|
-| <img src="assets/demo/photo1.jpg" width="150"><br>AI conference hall | interviewing, conference, astronauts, onstage | backstage, documentary, doubts | onstage, attendees, ceilings, seats, concert | demonstration conference, backstage interviewing |
-| <img src="assets/demo/photo2.jpg" width="150"><br>expo corridor crowd | attendees, passengers, protesters | attendees, gauche | attendees, passengers, ceiling, crowded | passengers attendees, demonstrators passengers |
-| <img src="assets/demo/photo3.jpg" width="150"><br>Porsche 911 interior | voiture, steering, yacht, dealership | sail, steering, seaside, engines | **carro, leather, steering, clock, seat** | automotive steering, carro dealership |
-| <img src="assets/demo/photo4.jpg" width="150"><br>Porsche on coastal road | driv, highway, racing, trail | road, racing, safari, cruising | highway, speeding, hill, climbing | highway driv, road racing |
-| <img src="assets/demo/photo5.jpg" width="150"><br>bear on grass | wolf, roar, muzzle, monkey | wolf, muzzle, hunting | **fur, bear, muzzle, ivory** | fur roar, elephant muzzle |
+| <img src="assets/demo/photo1.jpg" width="150"><br>AI conference hall | interviewing, conference, astronauts, onstage | backstage, documentary, doubts | onstage, attendees, ceilings, seats, concert | conference onstage, projector attendees |
+| <img src="assets/demo/photo2.jpg" width="150"><br>expo corridor crowd | attendees, passengers, protesters | attendees, gauche | attendees, passengers, ceiling, crowded | protester attendees, demonstrators passengers |
+| <img src="assets/demo/photo3.jpg" width="150"><br>Porsche 911 interior | voiture, steering, yacht, dealership | sail, steering, seaside, engines | **carro, leather, steering, clock, seat** | windshield driv, windshield rims |
+| <img src="assets/demo/photo4.jpg" width="150"><br>Porsche on coastal road | driv, highway, racing, trail | road, racing, safari, cruising | highway, speeding, hill, climbing | mountain road, roadway racer |
+| <img src="assets/demo/photo5.jpg" width="150"><br>bear on grass | wolf, roar, muzzle, monkey | wolf, muzzle, hunting | **fur, bear, muzzle, ivory** | redhead elk, black muzzle |
 
 `--hq` (CWR multi-crop) is clearly the sharpest: it recovers the small **bear**
 (fast/soft only reach "wolf") and picks up fine 911-interior detail
@@ -198,7 +197,7 @@ First run encodes the whole vocabulary once (`src/label_cache.npz`, ~40 s) and
 reuses it after. A small background prior ships in `src/bg_prior.npz`; regenerate
 a stronger one by pointing `--bg-dir` at a folder of neutral images.
 
-Flags: `--topk N` · `--hq` (CWR, higher accuracy) · `--ngram N` (grounded n-grams) · `--beam` (encoder-scored phrases) ·
+Flags: `--topk N` · `--hq` (CWR, higher accuracy) · `--ngram N` (grounded n-grams, beam-searched; `--no-beam` for greedy) ·
 `--soft` (softpool, better top-k precision).
 
 ## Repo layout
