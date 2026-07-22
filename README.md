@@ -1,5 +1,7 @@
 # jina-v5-omni-nano test-time image tagging
 
+[Slides](https://hanxiao.io/ttc-embedding-image-tagging-2026/) | [Talk](https://x.com/hxiao/status/2080025919549481294?s=20)
+
 Open-vocabulary, **multi-label** image tagging with a **single frozen model** —
 [`jinaai/jina-embeddings-v5-omni-nano-mlx`](https://huggingface.co/jinaai/jina-embeddings-v5-omni-nano-mlx)
 (~1B, MLX). **Zero training. No second model. No WordNet / regex dictionary /
