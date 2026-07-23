@@ -13,16 +13,16 @@ tokenizer vocabulary**. You give it an image, it returns tags.
 
 ```
 python src/tag_image.py assets/examples/cat.jpg --topk 6
-# cat.jpg (86ms): kitty, cosy, plush, crib, paw, sleeps
+# cat.jpg (54ms): kitty, cosy, plush, crib, paw, sleeps
 
 python src/tag_image.py assets/examples/zebra.jpg --topk 5 --hq
-# zebra.jpg (1016ms): fur, bear, puppy, muzzle, leather   # <- CWR recovers the small bear
+# zebra.jpg (766ms): fur, bear, puppy, muzzle, leather   # <- CWR recovers the small bear
 
 python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 2
-# cat.jpg (166ms): couch kitty, black cosy, grey plush, grey crib
+# cat.jpg (112ms): couch kitty, black cosy, grey plush, grey crib
 
 python src/tag_image.py assets/examples/cat.jpg --topk 4 --ngram 3
-# cat.jpg (238ms): grey couch kitty, sleeping black cosy, grey sleeping plush, sleeps grey crib
+# cat.jpg (181ms): grey couch kitty, sleeping black cosy, grey sleeping plush, sleeps grey crib
 
 ```
 
@@ -38,8 +38,8 @@ Experiment: `experiments/exp_ngram_beam.py`.
 flowchart LR
   subgraph OFF["Offline · cached once"]
     direction TB
-    V["Tokenizer vocab<br/>128,260 tokens"] -->|encode_text<br/>NOT embed_tokens| E["Label matrix E<br/>128260 × 768"]
-    GATE["word-start gate<br/>→ 25,465 clean words"]
+    V["Tokenizer vocab<br/>128,260 tokens"] -->|word-start gate| GATE["25,465 whole words"]
+    GATE -->|encode_text<br/>NOT embed_tokens| E["Label matrix E<br/>25,465 × 768"]
     MU["per-label prior mu<br/>from background images"]
   end
 
@@ -67,8 +67,7 @@ flowchart LR
   BASE ==> FUSE["S = base + 1.3 · s_crop"]
   CMAX ==> FUSE
 
-  FUSE ==> POST["word-start gate + embedding-NMS dedup"]
-  GATE -.->|keep word tokens only| POST
+  FUSE ==> POST["embedding-NMS dedup"]
   POST ==> OUT["Top-k TAGS"]
   POST -.->|optional --ngram| ADJ["patch-local n-grams<br/>couch kitty · grey blanket cosy"]
 
@@ -95,9 +94,9 @@ _(Benchmark: COCO-150, 80-cat — patch mAP 0.635 / P@1 0.753 → + CWR mAP 0.71
 | softpool T=0.05 | 0.773 | 0.449 | 0.649 | 0.608 |
 | **+ CWR multi-crop (`--hq`)** | **0.813** | **0.476** | **0.680** | **0.710** |
 
-Latency (M3 Ultra, MLX): fast mode ~60–90 ms/image; `--hq` ~1 s/image (14 crops).
+Latency (M3 Ultra, MLX): fast mode ~50–110 ms/image; `--hq` ~0.8 s/image (14 crops).
 
-## Demo: one image, four modes
+## Demo: five images, four modes
 
 Five images tagged with each mode (`fast` / `--soft` / `--hq` / `--ngram 2`). Labels
 come straight from the tokenizer vocab, so multilingual variants (voiture, carro)
@@ -195,7 +194,7 @@ export JINA_OMNI_NANO_DIR=/path/to/jina-embeddings-v5-omni-nano-mlx
 python src/tag_image.py your_image.jpg --hq
 ```
 
-First run encodes the whole vocabulary once (`src/label_cache.npz`, ~40 s) and
+First run encodes the word-start vocabulary slice once (`src/label_cache.npz`) and
 reuses it after. A small background prior ships in `src/bg_prior.npz`; regenerate
 a stronger one by pointing `--bg-dir` at a folder of neutral images.
 

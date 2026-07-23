@@ -25,9 +25,11 @@ Pipeline:
 Usage:
     python tag_image.py IMG [IMG ...] [--topk 8] [--hq] [--ngram 2] [--soft]
 
-First run builds label_cache.npz (encodes the whole vocab once, ~40s) next to
-this file, plus bg_prior.npz. Set JINA_OMNI_NANO_DIR to point at a local copy of
-the model, else it is auto-downloaded from HuggingFace.
+The label set is the word-start ('Ġ') vocab slice (~25k of the 128k tokens); no
+other token can ever be emitted, so only that slice is encoded, cached, and
+scored. First run builds label_cache.npz next to this file, plus bg_prior.npz.
+Set JINA_OMNI_NANO_DIR to point at a local copy of the model, else it is
+auto-downloaded from HuggingFace.
 """
 import os, sys, glob, json, argparse, time
 import numpy as np
@@ -42,25 +44,51 @@ CACHE_LABELS = os.path.join(HERE, "label_cache.npz")
 CACHE_PRIOR = os.path.join(HERE, "bg_prior.npz")
 
 
-def build_label_cache(m):
-    """Encode the whole tokenizer vocab as text labels via encode_text (one-time)."""
+def build_label_cache(m, model_dir):
+    """Encode the word-start ('\u0120') vocab slice as text labels via encode_text (one-time).
+    That slice IS the entire label set (no other token can ever be emitted), so only
+    those ~25k rows are encoded, stored, and later scored against."""
     tok = m.tokenizer
-    V = tok.get_vocab_size()
-    strings = []
-    for tid in range(V):
-        s = tok.decode([tid]) or ""
-        strings.append(s.strip() or "\u2205")
-    print(f"[cache] encoding {V} vocab tokens as text labels (one-time)...")
+    keep = np.where(C.word_start_gate(model_dir, tok.get_vocab_size()))[0]
+    strings = [(tok.decode([int(t)]) or "").strip() or "\u2205" for t in keep]
+    print(f"[cache] encoding {len(strings)} word-start vocab labels (one-time)...")
     import mlx.core as mx
     rows = []
     B = 1024
-    for i in range(0, V, B):
+    for i in range(0, len(strings), B):
         e = m.model.encode(strings[i:i + B], tok, task_type="retrieval.passage").astype(mx.float32)
         e = e / mx.linalg.norm(e, axis=1, keepdims=True)
         rows.append(np.array(e.tolist()).astype(np.float16))
     E = np.vstack(rows)
     np.savez(CACHE_LABELS, E=E, strings=np.array(strings, dtype=object))
     return E.astype(np.float32), strings
+
+
+def load_labels(m, proc, model_dir, bg_dir=None):
+    """Return (E, En, strings, mup, mug) for the word-start vocab label set.
+
+    Builds the cache on first run. Slices an older full-vocab cache, and the
+    shipped full-length background prior, down to the word-start set once, here,
+    so every downstream matmul runs on the ~25k-row label matrix directly."""
+    if os.path.exists(CACHE_LABELS):
+        d = np.load(CACHE_LABELS, allow_pickle=True)
+        E = d["E"].astype(np.float32); strings = list(d["strings"])
+    else:
+        E, strings = build_label_cache(m, model_dir)
+    V = m.tokenizer.get_vocab_size()
+    if len(strings) == V:                       # legacy full-vocab cache -> slice
+        keep = np.where(C.word_start_gate(model_dir, V))[0]
+        E = E[keep]; strings = [strings[i] for i in keep]
+    En = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-9)
+
+    if os.path.exists(CACHE_PRIOR):
+        z = np.load(CACHE_PRIOR); mup, mug = z["mup"], z["mug"]
+        if len(mup) != len(strings):            # full-length shipped prior -> slice
+            keep = np.where(C.word_start_gate(model_dir, V))[0]
+            mup = mup[keep]; mug = mug[keep]
+    else:
+        mup, mug = build_prior(m, proc, E, bg_dir)
+    return E, En, strings, mup, mug
 
 
 def build_prior(m, proc, E, bg_dir=None):
@@ -104,7 +132,7 @@ def grid_crops(img, ov=0.15):
     return out
 
 
-def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, beam=True, soft=False, hq=False):
+def tag(m, proc, pil, E, En, strings, mup, mug, topk=8, ngram=1, beam=True, soft=False, hq=False):
     P, g = C.image_feats(m.model, proc, pil)
     sim = P @ E.T
     if soft:
@@ -120,8 +148,7 @@ def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, beam=True
             sc = np.maximum((Pc @ E.T).max(0), gc @ E.T)
             crop_max = sc if crop_max is None else np.maximum(crop_max, sc)
         cen = cen + 1.3 * (crop_max - mup)
-    cen2 = cen.copy(); cen2[~gate] = -1e9
-    nouns = nms(np.argsort(-cen2)[:400], En, keep=topk)
+    nouns = nms(np.argsort(-cen)[:400], En, keep=topk)
     if ngram <= 1:
         return [strings[j].strip().lower() for j in nouns]
     res = []
@@ -131,7 +158,7 @@ def tag(m, proc, pil, E, En, strings, gate, mup, mug, topk=8, ngram=1, beam=True
         # n-1 top survivors (noun cluster excluded, mutual NMS) as modifiers.
         ps = sim[:, nid]; topp = np.argsort(-ps)[:max(3, len(ps) // 10)]
         local = P[topp].mean(0); local /= np.linalg.norm(local) + 1e-9
-        ls = local @ E.T; ls[~gate] = -1e9
+        ls = local @ E.T
         order = np.argsort(-ls)[:200]
         if not beam:
             mods = nms(order, En, keep=ngram - 1, tau=0.55, avoid=[nid])
@@ -183,24 +210,12 @@ def main():
 
     m, model_dir = C.load()
     proc = Qwen2VLImageProcessor.from_pretrained(model_dir)
-
-    if os.path.exists(CACHE_LABELS):
-        d = np.load(CACHE_LABELS, allow_pickle=True)
-        E = d["E"].astype(np.float32); strings = list(d["strings"])
-    else:
-        E, strings = build_label_cache(m)
-    En = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-9)
-    gate = C.word_start_gate(model_dir, len(strings))
-
-    if os.path.exists(CACHE_PRIOR):
-        z = np.load(CACHE_PRIOR); mup, mug = z["mup"], z["mug"]
-    else:
-        mup, mug = build_prior(m, proc, E, args.bg_dir)
+    E, En, strings, mup, mug = load_labels(m, proc, model_dir, args.bg_dir)
 
     for path in args.images:
         pil = Image.open(path).convert("RGB")
         t0 = time.time()
-        tags = tag(m, proc, pil, E, En, strings, gate, mup, mug,
+        tags = tag(m, proc, pil, E, En, strings, mup, mug,
                    topk=args.topk, ngram=args.ngram, beam=args.beam, soft=args.soft, hq=args.hq)
         dt = (time.time() - t0) * 1000
         print(f"{os.path.basename(path)} ({dt:.0f}ms): {', '.join(tags)}")
